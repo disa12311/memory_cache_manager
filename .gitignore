@@ -1,0 +1,58 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (optional - uncomment if you want to ignore it)
+# Cargo.lock
+
+# Debug builds
+debug/
+
+# Release builds (uncomment if you don't want to commit binaries)
+# release/
+
+# IDE và Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Windows specific
+Thumbs.db
+Desktop.ini
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Config files (optional - nếu không muốn commit config cá nhân)
+# cache_manager_config.json
+
+# Backup files
+*.bak
+*.tmp
+*.temp
+
+# Test coverage
+*.profraw
+*.profdata
+/coverage/
+
+# Documentation build
+/book/
+/docs/_build/
+
+# RLS và rust-analyzer
+/.rust-analyzer/
+rls/
+
+# Các file log
+*.log
+
+# OS generated files
+.Spotlight-V100
+.Trashes
+ehthumbs.db

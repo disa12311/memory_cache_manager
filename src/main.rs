@@ -17,14 +17,14 @@
 // codegen-units = 1
 // strip = true
 
+// Ẩn console window trên Windows
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -316,14 +316,6 @@ impl eframe::App for CacheManager {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    // Ẩn console window trên Windows khi build release
-    #[cfg(all(target_os = "windows", not(debug_assertions)))]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        // This will be handled by Windows subsystem setting
-    }
-
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([500.0, 550.0])
