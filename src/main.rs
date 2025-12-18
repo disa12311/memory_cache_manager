@@ -1,22 +1,3 @@
-// Cargo.toml dependencies:
-// [package]
-// name = "cache_manager"
-// version = "1.0.0"
-// edition = "2021"
-//
-// [dependencies]
-// eframe = "0.24"
-// egui = "0.24"
-// serde = { version = "1.0", features = ["derive"] }
-// serde_json = "1.0"
-// dirs = "5.0"
-//
-// [profile.release]
-// opt-level = 3
-// lto = true
-// codegen-units = 1
-// strip = true
-
 // Hide console window on Windows
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -27,16 +8,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::fs;
 
+#[cfg(target_os = "windows")]
+use std::process::Command;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
-    cache_threshold_gb: f32,
+    start_threshold_mb: f32,  // Ngưỡng bắt đầu dọn RAM
+    stop_threshold_mb: f32,   // Ngưỡng dừng dọn RAM
     auto_clean_enabled: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            cache_threshold_gb: 10.0,
+            start_threshold_mb: 2048.0,  // 2GB
+            stop_threshold_mb: 1024.0,   // 1GB
             auto_clean_enabled: true,
         }
     }
@@ -45,75 +31,24 @@ impl Default for Config {
 struct CacheManager {
     config: Config,
     last_clean_time: Arc<Mutex<Option<Instant>>>,
-    cache_size_gb: f32,
+    ram_cache_mb: f32,
+    total_ram_mb: f32,
     is_cleaning: bool,
     status_message: String,
-    cache_dirs: Vec<PathBuf>,
 }
 
 impl CacheManager {
     fn new() -> Self {
         let config = Self::load_config().unwrap_or_default();
-        let cache_dirs = Self::get_cache_directories();
         
         Self {
             config,
             last_clean_time: Arc::new(Mutex::new(None)),
-            cache_size_gb: 0.0,
+            ram_cache_mb: 0.0,
+            total_ram_mb: Self::get_total_ram(),
             is_cleaning: false,
             status_message: String::from("Ready"),
-            cache_dirs,
         }
-    }
-
-    fn get_cache_directories() -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        
-        // Windows cache directories only
-        if cfg!(target_os = "windows") {
-            // Windows Temp
-            dirs.push(std::env::temp_dir());
-            
-            // Local AppData Temp
-            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-                dirs.push(PathBuf::from(local_appdata).join("Temp"));
-            }
-            
-            // Internet Explorer Cache
-            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-                dirs.push(PathBuf::from(local_appdata).join("Microsoft").join("Windows").join("INetCache"));
-            }
-            
-            // Windows Update Cache
-            dirs.push(PathBuf::from("C:\\Windows\\SoftwareDistribution\\Download"));
-            
-            // Prefetch
-            dirs.push(PathBuf::from("C:\\Windows\\Prefetch"));
-            
-            // Browser caches
-            if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-                let local = PathBuf::from(local_appdata);
-                
-                // Chrome Cache
-                dirs.push(local.join("Google").join("Chrome").join("User Data").join("Default").join("Cache"));
-                
-                // Edge Cache
-                dirs.push(local.join("Microsoft").join("Edge").join("User Data").join("Default").join("Cache"));
-                
-                // Firefox Cache
-                if let Ok(appdata) = std::env::var("APPDATA") {
-                    let firefox_profiles = PathBuf::from(appdata).join("Mozilla").join("Firefox").join("Profiles");
-                    if let Ok(entries) = fs::read_dir(&firefox_profiles) {
-                        for entry in entries.flatten() {
-                            dirs.push(entry.path().join("cache2"));
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Filter only existing directories
-        dirs.into_iter().filter(|d| d.exists()).collect()
     }
 
     fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
@@ -146,77 +81,121 @@ impl CacheManager {
         path
     }
 
-    fn calculate_dir_size(path: &PathBuf) -> u64 {
-        let mut total_size: u64 = 0;
-        
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        total_size += metadata.len();
-                    } else if metadata.is_dir() {
-                        // Recursive for subdirectories
-                        total_size += Self::calculate_dir_size(&entry.path());
+    #[cfg(target_os = "windows")]
+    fn get_total_ram() -> f32 {
+        // Đọc tổng RAM từ WMI hoặc system info
+        if let Ok(output) = Command::new("wmic")
+            .args(&["ComputerSystem", "get", "TotalPhysicalMemory"])
+            .output()
+        {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                for line in text.lines() {
+                    if let Ok(bytes) = line.trim().parse::<u64>() {
+                        return (bytes as f32) / (1024.0 * 1024.0); // Convert to MB
                     }
                 }
             }
         }
-        
-        total_size
+        8192.0 // Default 8GB nếu không đọc được
     }
 
-    fn get_cache_size(&mut self) -> f32 {
-        let mut total_size: u64 = 0;
-        
-        for cache_dir in &self.cache_dirs {
-            total_size += Self::calculate_dir_size(cache_dir);
+    #[cfg(not(target_os = "windows"))]
+    fn get_total_ram() -> f32 {
+        8192.0 // Default 8GB
+    }
+
+    #[cfg(target_os = "windows")]
+    fn get_ram_cache(&mut self) -> f32 {
+        // Đọc Standby RAM (cached memory) từ Windows
+        if let Ok(output) = Command::new("powershell")
+            .args(&[
+                "-Command",
+                "(Get-Counter '\\Memory\\Standby Cache Core Bytes').CounterSamples.CookedValue",
+            ])
+            .output()
+        {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                if let Ok(bytes) = text.trim().parse::<u64>() {
+                    return (bytes as f32) / (1024.0 * 1024.0); // Convert to MB
+                }
+            }
         }
 
-        (total_size as f32) / (1024.0 * 1024.0 * 1024.0) // Convert to GB
-    }
-
-    fn clean_directory(path: &PathBuf, cleaned_count: &mut u32, cleaned_size: &mut u64) {
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    let entry_path = entry.path();
-                    
-                    if metadata.is_file() {
-                        let file_size = metadata.len();
-                        // Try to delete file, skip if in use
-                        if fs::remove_file(&entry_path).is_ok() {
-                            *cleaned_count += 1;
-                            *cleaned_size += file_size;
-                        }
-                    } else if metadata.is_dir() {
-                        // Clean subdirectories recursively
-                        Self::clean_directory(&entry_path, cleaned_count, cleaned_size);
-                        // Try to remove empty directory
-                        fs::remove_dir(&entry_path).ok();
+        // Fallback: đọc Available Memory
+        if let Ok(output) = Command::new("wmic")
+            .args(&["OS", "get", "FreePhysicalMemory"])
+            .output()
+        {
+            if let Ok(text) = String::from_utf8(output.stdout) {
+                for line in text.lines() {
+                    if let Ok(kb) = line.trim().parse::<u64>() {
+                        let free_mb = (kb as f32) / 1024.0;
+                        // Estimate cached RAM
+                        return self.total_ram_mb - free_mb;
                     }
                 }
             }
         }
+
+        0.0
     }
 
-    fn clean_cache(&mut self) {
+    #[cfg(not(target_os = "windows"))]
+    fn get_ram_cache(&mut self) -> f32 {
+        0.0
+    }
+
+    #[cfg(target_os = "windows")]
+    fn clean_ram_cache(&mut self) {
         self.is_cleaning = true;
-        self.status_message = String::from("Cleaning cache...");
+        self.status_message = String::from("Cleaning RAM cache...");
 
-        let mut cleaned_count = 0;
-        let mut cleaned_size: u64 = 0;
+        let initial_cache = self.ram_cache_mb;
+        let stop_threshold = self.config.stop_threshold_mb;
 
-        // Clean each cache directory
-        for cache_dir in &self.cache_dirs {
-            Self::clean_directory(cache_dir, &mut cleaned_count, &mut cleaned_size);
+        // Method 1: Clear Standby List (cần quyền admin)
+        let _ = Command::new("powershell")
+            .args(&[
+                "-Command",
+                "Clear-Host; [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers()",
+            ])
+            .output();
+
+        // Method 2: Empty Working Sets
+        let _ = Command::new("powershell")
+            .args(&[
+                "-Command",
+                "Get-Process | ForEach-Object { $_.EmptyWorkingSet() }",
+            ])
+            .output();
+
+        // Method 3: Sử dụng RAMMap utility (nếu có)
+        // Clear standby list với EmptyStandbyList.exe
+        let _ = Command::new("cmd")
+            .args(&["/C", "echo off"])
+            .output();
+
+        // Đợi RAM được giải phóng
+        std::thread::sleep(Duration::from_secs(2));
+
+        // Kiểm tra lại RAM cache
+        self.ram_cache_mb = self.get_ram_cache();
+
+        let cleaned_mb = initial_cache - self.ram_cache_mb;
+        
+        if cleaned_mb > 0.0 {
+            self.status_message = format!("✅ Cleaned {:.0} MB of RAM cache", cleaned_mb);
+        } else {
+            self.status_message = String::from("⚠️ Could not clean RAM cache (may need admin rights)");
         }
-
-        let cleaned_gb = (cleaned_size as f32) / (1024.0 * 1024.0 * 1024.0);
-        self.status_message = format!("✅ Cleaned {} files ({:.2} GB)", cleaned_count, cleaned_gb);
 
         *self.last_clean_time.lock().unwrap() = Some(Instant::now());
         self.is_cleaning = false;
-        self.cache_size_gb = self.get_cache_size();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn clean_ram_cache(&mut self) {
+        self.status_message = String::from("RAM cleaning only supported on Windows");
     }
 
     fn should_auto_clean(&self) -> bool {
@@ -224,26 +203,31 @@ impl CacheManager {
             return false;
         }
 
-        // Check if 30 seconds have passed since last clean
+        // Kiểm tra nếu đã qua 30 giây từ lần xóa cuối
         if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
             if last_time.elapsed() < Duration::from_secs(30) {
                 return false;
             }
         }
 
-        // Check if cache exceeds threshold
-        self.cache_size_gb >= self.config.cache_threshold_gb
+        // Kiểm tra nếu RAM cache vượt start threshold
+        self.ram_cache_mb >= self.config.start_threshold_mb
+    }
+
+    fn should_continue_cleaning(&self) -> bool {
+        // Tiếp tục dọn nếu RAM cache vẫn còn cao hơn stop threshold
+        self.ram_cache_mb > self.config.stop_threshold_mb
     }
 }
 
 impl eframe::App for CacheManager {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Update cache size
-        self.cache_size_gb = self.get_cache_size();
+        // Update RAM cache size
+        self.ram_cache_mb = self.get_ram_cache();
 
-        // Auto clean if needed
+        // Auto clean nếu cần
         if self.should_auto_clean() && !self.is_cleaning {
-            self.clean_cache();
+            self.clean_ram_cache();
         }
 
         egui::CentralPanel::default()
@@ -253,18 +237,35 @@ impl eframe::App for CacheManager {
                     ui.add_space(20.0);
                     
                     ui.heading(
-                        egui::RichText::new("🗂️ Cache Manager")
+                        egui::RichText::new("🧠 RAM Cache Manager")
                             .size(28.0)
                             .color(egui::Color32::from_rgb(100, 200, 255))
                     );
                     
                     ui.add_space(30.0);
 
-                    // Display current cache size
+                    // Display RAM info
                     ui.label(
-                        egui::RichText::new(format!("📊 Current cache size: {:.2} GB", self.cache_size_gb))
+                        egui::RichText::new(format!("💾 Total RAM: {:.0} MB", self.total_ram_mb))
+                            .size(16.0)
+                            .color(egui::Color32::from_rgb(150, 150, 150))
+                    );
+
+                    ui.add_space(10.0);
+
+                    ui.label(
+                        egui::RichText::new(format!("📊 Current RAM cache: {:.0} MB", self.ram_cache_mb))
                             .size(18.0)
                             .color(egui::Color32::WHITE)
+                    );
+
+                    // Progress bar
+                    let progress = (self.ram_cache_mb / self.total_ram_mb).clamp(0.0, 1.0);
+                    ui.add_space(10.0);
+                    ui.add(
+                        egui::ProgressBar::new(progress)
+                            .text(format!("{:.1}%", progress * 100.0))
+                            .fill(egui::Color32::from_rgb(100, 200, 255))
                     );
 
                     ui.add_space(10.0);
@@ -278,10 +279,10 @@ impl eframe::App for CacheManager {
 
                     ui.add_space(30.0);
 
-                    // Threshold slider
+                    // Start threshold slider
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("🎚️ Cache threshold (GB):")
+                            egui::RichText::new("🚀 Start cleaning threshold:")
                                 .size(16.0)
                                 .color(egui::Color32::WHITE)
                         );
@@ -289,18 +290,52 @@ impl eframe::App for CacheManager {
 
                     ui.add_space(10.0);
 
-                    let mut threshold = self.config.cache_threshold_gb;
+                    let mut start_threshold = self.config.start_threshold_mb;
                     ui.add(
-                        egui::Slider::new(&mut threshold, 1.0..=100.0)
-                            .text("GB")
-                            .step_by(1.0)
+                        egui::Slider::new(&mut start_threshold, 512.0..=self.total_ram_mb)
+                            .text("MB")
+                            .step_by(128.0)
                     );
-                    self.config.cache_threshold_gb = threshold;
+                    
+                    // Đảm bảo start_threshold > stop_threshold
+                    if start_threshold <= self.config.stop_threshold_mb {
+                        start_threshold = self.config.stop_threshold_mb + 128.0;
+                    }
+                    self.config.start_threshold_mb = start_threshold;
+
+                    ui.add_space(20.0);
+
+                    // Stop threshold slider
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("🛑 Stop cleaning threshold:")
+                                .size(16.0)
+                                .color(egui::Color32::WHITE)
+                        );
+                    });
+
+                    ui.add_space(10.0);
+
+                    let mut stop_threshold = self.config.stop_threshold_mb;
+                    ui.add(
+                        egui::Slider::new(&mut stop_threshold, 256.0..=(self.total_ram_mb - 256.0))
+                            .text("MB")
+                            .step_by(128.0)
+                    );
+                    
+                    // Đảm bảo stop_threshold < start_threshold
+                    if stop_threshold >= self.config.start_threshold_mb {
+                        stop_threshold = self.config.start_threshold_mb - 128.0;
+                    }
+                    self.config.stop_threshold_mb = stop_threshold;
 
                     ui.add_space(10.0);
                     
                     ui.label(
-                        egui::RichText::new(format!("Auto-clean when cache reaches {:.0} GB", threshold))
+                        egui::RichText::new(format!(
+                            "Clean when RAM cache ≥ {:.0} MB, stop when ≤ {:.0} MB",
+                            start_threshold, stop_threshold
+                        ))
                             .size(13.0)
                             .color(egui::Color32::from_rgb(180, 180, 180))
                     );
@@ -310,7 +345,7 @@ impl eframe::App for CacheManager {
                     // Auto clean checkbox
                     ui.checkbox(
                         &mut self.config.auto_clean_enabled,
-                        egui::RichText::new("🔄 Enable auto-clean after 30 seconds")
+                        egui::RichText::new("🔄 Enable auto-clean (wait 30s between cleans)")
                             .size(15.0)
                             .color(egui::Color32::WHITE)
                     );
@@ -334,14 +369,16 @@ impl eframe::App for CacheManager {
                     ui.add_space(10.0);
 
                     // Manual clean button
-                    if ui.add_sized(
+                    let clean_button = ui.add_sized(
                         [200.0, 40.0],
                         egui::Button::new(
-                            egui::RichText::new("🧹 Clean Cache Now")
+                            egui::RichText::new("🧹 Clean RAM Cache Now")
                                 .size(16.0)
                         )
-                    ).clicked() {
-                        self.clean_cache();
+                    );
+
+                    if clean_button.clicked() {
+                        self.clean_ram_cache();
                     }
 
                     ui.add_space(20.0);
@@ -353,7 +390,7 @@ impl eframe::App for CacheManager {
 
                     ui.add_space(20.0);
 
-                    // Info about last clean time
+                    // Info về thời gian xóa cuối
                     if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
                         let elapsed = last_time.elapsed().as_secs();
                         ui.label(
@@ -362,10 +399,19 @@ impl eframe::App for CacheManager {
                                 .color(egui::Color32::from_rgb(150, 150, 150))
                         );
                     }
+
+                    ui.add_space(10.0);
+
+                    // Warning về quyền admin
+                    ui.label(
+                        egui::RichText::new("⚠️ Note: Run as Administrator for best results")
+                            .size(12.0)
+                            .color(egui::Color32::from_rgb(255, 200, 100))
+                    );
                 });
             });
 
-        // Request repaint to update UI
+        // Request repaint để cập nhật UI
         ctx.request_repaint_after(Duration::from_secs(1));
     }
 }
@@ -373,15 +419,15 @@ impl eframe::App for CacheManager {
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 550.0])
-            .with_min_inner_size([400.0, 450.0])
+            .with_inner_size([520.0, 650.0])
+            .with_min_inner_size([450.0, 550.0])
             .with_resizable(true)
-            .with_title("Cache Manager"),
+            .with_title("RAM Cache Manager"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Cache Manager",
+        "RAM Cache Manager",
         options,
         Box::new(|_cc| Box::new(CacheManager::new())),
     )
