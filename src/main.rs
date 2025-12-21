@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
     start_threshold_mb: f32,  // Ngưỡng bắt đầu dọn RAM
@@ -82,60 +85,59 @@ impl CacheManager {
 
     #[cfg(target_os = "windows")]
     fn get_total_ram() -> f32 {
-        // Đọc tổng RAM từ WMI hoặc system info
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
         if let Ok(output) = Command::new("wmic")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(CREATE_NO_WINDOW)
             .args(&["ComputerSystem", "get", "TotalPhysicalMemory"])
             .output()
         {
             if let Ok(text) = String::from_utf8(output.stdout) {
                 for line in text.lines() {
                     if let Ok(bytes) = line.trim().parse::<u64>() {
-                        return (bytes as f32) / (1024.0 * 1024.0); // Convert to MB
+                        return (bytes as f32) / (1024.0 * 1024.0);
                     }
                 }
             }
         }
-        8192.0 // Default 8GB nếu không đọc được
+        8192.0 // Default 8GB
     }
 
     #[cfg(not(target_os = "windows"))]
     fn get_total_ram() -> f32 {
-        8192.0 // Default 8GB
+        8192.0
     }
 
     #[cfg(target_os = "windows")]
     fn get_ram_cache(&mut self) -> f32 {
-        // Đọc Standby RAM (cached memory) từ Windows
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        
+        // Try reading Standby Cache
         if let Ok(output) = Command::new("powershell")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(CREATE_NO_WINDOW)
             .args(&[
-                "-NoProfile",
-                "-WindowStyle", "Hidden",
-                "-Command",
+                "-NoProfile", "-WindowStyle", "Hidden", "-Command",
                 "(Get-Counter '\\Memory\\Standby Cache Core Bytes').CounterSamples.CookedValue",
             ])
             .output()
         {
             if let Ok(text) = String::from_utf8(output.stdout) {
                 if let Ok(bytes) = text.trim().parse::<u64>() {
-                    return (bytes as f32) / (1024.0 * 1024.0); // Convert to MB
+                    return (bytes as f32) / (1024.0 * 1024.0);
                 }
             }
         }
 
-        // Fallback: đọc Available Memory
+        // Fallback: estimate from free memory
         if let Ok(output) = Command::new("wmic")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(CREATE_NO_WINDOW)
             .args(&["OS", "get", "FreePhysicalMemory"])
             .output()
         {
             if let Ok(text) = String::from_utf8(output.stdout) {
                 for line in text.lines() {
                     if let Ok(kb) = line.trim().parse::<u64>() {
-                        let free_mb = (kb as f32) / 1024.0;
-                        // Estimate cached RAM
-                        return self.total_ram_mb - free_mb;
+                        return self.total_ram_mb - (kb as f32 / 1024.0);
                     }
                 }
             }
@@ -155,60 +157,41 @@ impl CacheManager {
         self.status_message = String::from("Cleaning RAM cache...");
 
         let initial_cache = self.ram_cache_mb;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        // Method 1: Garbage Collection (an toàn nhất)
-        let gc_result = Command::new("powershell")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        // Method 1: Force Garbage Collection
+        let _ = Command::new("powershell")
+            .creation_flags(CREATE_NO_WINDOW)
             .args(&[
-                "-NoProfile",
-                "-WindowStyle", "Hidden",
-                "-Command",
-                "[System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced); [System.GC]::WaitForPendingFinalizers()",
+                "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+                "[System.GC]::Collect([System.GC]::MaxGeneration, [System.GCCollectionMode]::Forced); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()",
             ])
             .output();
 
-        if gc_result.is_ok() {
-            std::thread::sleep(Duration::from_millis(500));
-        }
+        std::thread::sleep(Duration::from_millis(300));
 
-        // Method 2: Empty Working Sets (an toàn, không cần admin)
+        // Method 2: Empty Working Sets of large processes
         let _ = Command::new("powershell")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .creation_flags(CREATE_NO_WINDOW)
             .args(&[
-                "-NoProfile",
-                "-WindowStyle", "Hidden",
-                "-Command",
-                "$processes = Get-Process | Where-Object {$_.WorkingSet64 -gt 10MB}; foreach($p in $processes) { try { $p.MinWorkingSet = 1; $p.MaxWorkingSet = 1; } catch {} }",
+                "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+                "$ps = Get-Process | Where-Object {$_.WorkingSet64 -gt 50MB} | Sort-Object WorkingSet64 -Descending | Select-Object -First 20; foreach($p in $ps) { try { $p.MinWorkingSet = 1KB; $p.MaxWorkingSet = 1KB } catch {} }",
             ])
             .output();
 
         std::thread::sleep(Duration::from_millis(500));
 
-        // Method 3: Clear System Cache (cần admin, nhưng an toàn)
-        // Chỉ chạy nếu có quyền admin
-        let _ = Command::new("powershell")
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .args(&[
-                "-NoProfile",
-                "-WindowStyle", "Hidden",
-                "-Command",
-                "if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Clear-RecycleBin -Force -ErrorAction SilentlyContinue }",
-            ])
-            .output();
-
-        std::thread::sleep(Duration::from_secs(1));
-
-        // Kiểm tra lại RAM cache
+        // Update RAM cache value
         self.ram_cache_mb = self.get_ram_cache();
         let cleaned_mb = initial_cache - self.ram_cache_mb;
         
-        if cleaned_mb > 10.0 {
-            self.status_message = format!("✅ Cleaned {:.0} MB of RAM cache", cleaned_mb);
+        self.status_message = if cleaned_mb > 50.0 {
+            format!("✅ Cleaned {:.0} MB of RAM cache", cleaned_mb)
         } else if cleaned_mb > 0.0 {
-            self.status_message = format!("⚠️ Cleaned only {:.0} MB (run as admin for better results)", cleaned_mb);
+            format!("⚠️ Cleaned {:.0} MB (limited without admin rights)", cleaned_mb)
         } else {
-            self.status_message = String::from("⚠️ No RAM freed. Try running as Administrator");
-        }
+            String::from("⚠️ Unable to free RAM. Try running as Administrator")
+        };
 
         *self.last_clean_time.lock().unwrap() = Some(Instant::now());
         self.is_cleaning = false;
@@ -296,15 +279,12 @@ impl eframe::App for CacheManager {
                     ui.add_space(30.0);
 
                     // Start threshold slider
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("🚀 Start cleaning threshold:")
-                                .size(16.0)
-                                .color(egui::Color32::WHITE)
-                        );
-                    });
-
-                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("🚀 Start cleaning threshold:")
+                            .size(16.0)
+                            .color(egui::Color32::WHITE)
+                    );
+                    ui.add_space(5.0);
 
                     let mut start_threshold = self.config.start_threshold_mb;
                     ui.add(
@@ -313,24 +293,20 @@ impl eframe::App for CacheManager {
                             .step_by(128.0)
                     );
                     
-                    // Đảm bảo start_threshold > stop_threshold
                     if start_threshold <= self.config.stop_threshold_mb {
                         start_threshold = self.config.stop_threshold_mb + 128.0;
                     }
                     self.config.start_threshold_mb = start_threshold;
 
-                    ui.add_space(20.0);
+                    ui.add_space(15.0);
 
                     // Stop threshold slider
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("🛑 Stop cleaning threshold:")
-                                .size(16.0)
-                                .color(egui::Color32::WHITE)
-                        );
-                    });
-
-                    ui.add_space(10.0);
+                    ui.label(
+                        egui::RichText::new("🛑 Stop cleaning threshold:")
+                            .size(16.0)
+                            .color(egui::Color32::WHITE)
+                    );
+                    ui.add_space(5.0);
 
                     let mut stop_threshold = self.config.stop_threshold_mb;
                     ui.add(
@@ -339,7 +315,6 @@ impl eframe::App for CacheManager {
                             .step_by(128.0)
                     );
                     
-                    // Đảm bảo stop_threshold < start_threshold
                     if stop_threshold >= self.config.start_threshold_mb {
                         stop_threshold = self.config.start_threshold_mb - 128.0;
                     }
@@ -366,61 +341,46 @@ impl eframe::App for CacheManager {
                             .color(egui::Color32::WHITE)
                     );
 
-                    ui.add_space(30.0);
+                    ui.add_space(25.0);
 
-                    // Save button
-                    if ui.add_sized(
-                        [200.0, 40.0],
-                        egui::Button::new(
-                            egui::RichText::new("💾 Save Configuration")
-                                .size(16.0)
-                        )
-                    ).clicked() {
-                        match self.save_config() {
-                            Ok(_) => self.status_message = String::from("✅ Configuration saved"),
-                            Err(e) => self.status_message = format!("❌ Error: {}", e),
-                        }
+                    // Buttons
+                    if ui.add_sized([200.0, 40.0], egui::Button::new(
+                        egui::RichText::new("💾 Save Configuration").size(16.0)
+                    )).clicked() {
+                        self.status_message = match self.save_config() {
+                            Ok(_) => String::from("✅ Configuration saved"),
+                            Err(e) => format!("❌ Error: {}", e),
+                        };
                     }
 
                     ui.add_space(10.0);
 
-                    // Manual clean button
-                    let clean_button = ui.add_sized(
-                        [200.0, 40.0],
-                        egui::Button::new(
-                            egui::RichText::new("🧹 Clean RAM Cache Now")
-                                .size(16.0)
-                        )
-                    );
-
-                    if clean_button.clicked() {
+                    if ui.add_sized([200.0, 40.0], egui::Button::new(
+                        egui::RichText::new("🧹 Clean RAM Cache Now").size(16.0)
+                    )).clicked() {
                         self.clean_ram_cache();
                     }
 
-                    ui.add_space(20.0);
+                    ui.add_space(15.0);
 
-                    // Progress indicator
                     if self.is_cleaning {
                         ui.spinner();
+                        ui.add_space(10.0);
                     }
 
-                    ui.add_space(20.0);
-
-                    // Info về thời gian xóa cuối
+                    // Last cleaned info
                     if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
-                        let elapsed = last_time.elapsed().as_secs();
                         ui.label(
-                            egui::RichText::new(format!("⏱️ Last cleaned: {} seconds ago", elapsed))
+                            egui::RichText::new(format!("⏱️ Last cleaned: {} seconds ago", last_time.elapsed().as_secs()))
                                 .size(13.0)
                                 .color(egui::Color32::from_rgb(150, 150, 150))
                         );
+                        ui.add_space(5.0);
                     }
 
-                    ui.add_space(10.0);
-
-                    // Warning về quyền admin
+                    // Admin warning
                     ui.label(
-                        egui::RichText::new("⚠️ Note: Run as Administrator for best results")
+                        egui::RichText::new("⚠️ Run as Administrator for best results")
                             .size(12.0)
                             .color(egui::Color32::from_rgb(255, 200, 100))
                     );
@@ -435,7 +395,7 @@ impl eframe::App for CacheManager {
 fn main() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 650.0])
+            .with_inner_size([500.0, 620.0])
             .with_min_inner_size([450.0, 550.0])
             .with_resizable(true)
             .with_title("RAM Cache Manager"),
