@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Cache Manager v1.0</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #ffffff;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .container {
+            max-width: 550px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            color: #64b5f6;
+            margin-bottom: 5px;
+        }
+
+        .version {
+            font-size: 14px;
+            color: #90caf9;
+            opacity: 0.8;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .memory-display {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .memory-value {
+            font-size: 48px;
+            font-weight: bold;
+            color: #64b5f6;
+            margin: 10px 0;
+        }
+
+        .memory-label {
+            font-size: 14px;
+            color: #b0bec5;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 15px 0;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #42a5f5 0%, #64b5f6 100%);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .info-item {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+        }
+
+        .info-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #90caf9;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #b0bec5;
+            margin-top: 5px;
+        }
+
+        .slider-group {
+            margin: 20px 0;
+        }
+
+        .slider-label {
+            font-size: 14px;
+            color: #90caf9;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #64b5f6;
+            cursor: pointer;
+        }
+
+        .slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #64b5f6;
+            cursor: pointer;
+            border: none;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            cursor: pointer;
+            margin: 15px 0;
+        }
+
+        .checkbox-group input {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            cursor: pointer;
+        }
+
+        .button {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 10px 0;
+        }
+
+        .button-primary {
+            background: linear-gradient(135deg, #42a5f5 0%, #1976d2 100%);
+            color: white;
+        }
+
+        .button-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(66, 165, 245, 0.4);
+        }
+
+        .button-secondary {
+            background: linear-gradient(135deg, #26a69a 0%, #00897b 100%);
+            color: white;
+        }
+
+        .button-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(38, 166, 154, 0.4);
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-size: 14px;
+        }
+
+        .status.success {
+            background: rgba(76, 175, 80, 0.2);
+            color: #81c784;
+        }
+
+        .status.warning {
+            background: rgba(255, 152, 0, 0.2);
+            color: #ffb74d;
+        }
+
+        .status.info {
+            background: rgba(33, 150, 243, 0.2);
+            color: #64b5f6;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #64b5f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 12px;
+            color: #78909c;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🧠 Memory Cache Manager</h1>
+            <p class="version">Version 1.0.0</p>
+        </div>
+
+        <div class="card">
+            <div class="memory-display">
+                <div class="memory-label">Used Memory</div>
+                <div class="memory-value" id="usedMemory">0 MB</div>
+            </div>
+
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill">0%</div>
+            </div>
+
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="info-value" id="totalMemory">0 MB</div>
+                    <div class="info-label">Total RAM</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-value" id="cacheMemory">0 MB</div>
+                    <div class="info-label">Cache Estimate</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="slider-group">
+                <div class="slider-label">
+                    <span>🚀 Start Threshold</span>
+                    <span id="startValue">2048 MB</span>
+                </div>
+                <input type="range" class="slider" id="startThreshold" min="512" max="8192" step="128" value="2048">
+            </div>
+
+            <div class="slider-group">
+                <div class="slider-label">
+                    <span>🛑 Stop Threshold</span>
+                    <span id="stopValue">1024 MB</span>
+                </div>
+                <input type="range" class="slider" id="stopThreshold" min="256" max="4096" step="128" value="1024">
+            </div>
+
+            <label class="checkbox-group">
+                <input type="checkbox" id="autoClean" checked>
+                <span>🔄 Enable Auto-Clean (30s interval)</span>
+            </label>
+        </div>
+
+        <div class="card">
+            <button class="button button-primary" id="cleanBtn">🧹 Clean Memory Cache Now</button>
+            <button class="button button-secondary" id="saveBtn">💾 Save Configuration</button>
+            
+            <div id="spinner" class="spinner hidden"></div>
+            <div id="status" class="status info hidden">Ready</div>
+        </div>
+
+        <div class="footer">
+            ⚠️ Run as Administrator for best results<br>
+            Windows Memory Cache Manager
+        </div>
+    </div>
+
+    <script>
+        const { invoke } = window.__TAURI__.tauri;
+
+        let config = {
+            start_threshold_mb: 2048,
+            stop_threshold_mb: 1024,
+            auto_clean_enabled: true
+        };
+
+        let lastCleanTime = null;
+
+        // Update memory info
+        async function updateMemoryInfo() {
+            try {
+                const info = await invoke('get_memory_info');
+                
+                document.getElementById('usedMemory').textContent = `${info.used_mb} MB`;
+                document.getElementById('totalMemory').textContent = `${info.total_mb} MB`;
+                document.getElementById('cacheMemory').textContent = `${info.cache_mb} MB`;
+                
+                const progressFill = document.getElementById('progressFill');
+                progressFill.style.width = `${info.usage_percent}%`;
+                progressFill.textContent = `${info.usage_percent.toFixed(1)}%`;
+
+                // Auto-clean check
+                if (config.auto_clean_enabled && info.cache_mb >= config.start_threshold_mb) {
+                    const now = Date.now();
+                    if (!lastCleanTime || (now - lastCleanTime) >= 30000) {
+                        await cleanMemory();
+                    }
+                }
+            } catch (error) {
+                showStatus('Error getting memory info: ' + error, 'warning');
+            }
+        }
+
+        // Clean memory
+        async function cleanMemory() {
+            const cleanBtn = document.getElementById('cleanBtn');
+            const spinner = document.getElementById('spinner');
+            
+            cleanBtn.disabled = true;
+            spinner.classList.remove('hidden');
+            showStatus('Cleaning memory cache...', 'info');
+
+            try {
+                const targetMb = config.start_threshold_mb - config.stop_threshold_mb;
+                const cleaned = await invoke('clean_memory_cache', { targetMb });
+                
+                lastCleanTime = Date.now();
+                showStatus(`✅ Cleaned ${cleaned} MB of memory cache`, 'success');
+                
+                // Update display
+                await updateMemoryInfo();
+            } catch (error) {
+                showStatus('⚠️ Error: ' + error, 'warning');
+            } finally {
+                cleanBtn.disabled = false;
+                spinner.classList.add('hidden');
+            }
+        }
+
+        // Save config
+        async function saveConfig() {
+            try {
+                await invoke('save_config', { config });
+                showStatus('✅ Configuration saved successfully', 'success');
+            } catch (error) {
+                showStatus('❌ Error saving config: ' + error, 'warning');
+            }
+        }
+
+        // Show status message
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.classList.remove('hidden');
+
+            setTimeout(() => {
+                status.classList.add('hidden');
+            }, 3000);
+        }
+
+        // Event listeners
+        document.getElementById('startThreshold').addEventListener('input', (e) => {
+            const value = parseInt(e.target.value);
+            config.start_threshold_mb = value;
+            document.getElementById('startValue').textContent = `${value} MB`;
+            
+            // Ensure start > stop
+            const stopSlider = document.getElementById('stopThreshold');
+            if (value <= config.stop_threshold_mb) {
+                config.stop_threshold_mb = Math.max(256, value - 128);
+                stopSlider.value = config.stop_threshold_mb;
+                document.getElementById('stopValue').textContent = `${config.stop_threshold_mb} MB`;
+            }
+        });
+
+        document.getElementById('stopThreshold').addEventListener('input', (e) => {
+            const value = parseInt(e.target.value);
+            config.stop_threshold_mb = value;
+            document.getElementById('stopValue').textContent = `${value} MB`;
+            
+            // Ensure stop < start
+            const startSlider = document.getElementById('startThreshold');
+            if (value >= config.start_threshold_mb) {
+                config.start_threshold_mb = value + 128;
+                startSlider.value = config.start_threshold_mb;
+                document.getElementById('startValue').textContent = `${config.start_threshold_mb} MB`;
+            }
+        });
+
+        document.getElementById('autoClean').addEventListener('change', (e) => {
+            config.auto_clean_enabled = e.target.checked;
+        });
+
+        document.getElementById('cleanBtn').addEventListener('click', cleanMemory);
+        document.getElementById('saveBtn').addEventListener('click', saveConfig);
+
+        // Load config and start monitoring
+        async function init() {
+            try {
+                config = await invoke('load_config');
+                document.getElementById('startThreshold').value = config.start_threshold_mb;
+                document.getElementById('stopThreshold').value = config.stop_threshold_mb;
+                document.getElementById('autoClean').checked = config.auto_clean_enabled;
+                document.getElementById('startValue').textContent = `${config.start_threshold_mb} MB`;
+                document.getElementById('stopValue').textContent = `${config.stop_threshold_mb} MB`;
+            } catch (error) {
+                console.log('Using default config');
+            }
+
+            // Update every 3 seconds
+            updateMemoryInfo();
+            setInterval(updateMemoryInfo, 3000);
+        }
+
+        init();
+    </script>
+</body>
+</html>

@@ -1,378 +1,156 @@
-// Hide console window on Windows
+// Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use eframe::egui;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use tauri::State;
 
 #[cfg(target_os = "windows")]
-use std::process::Command;
-
+use winapi::um::memoryapi::VirtualAlloc;
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use winapi::um::memoryapi::VirtualFree;
+#[cfg(target_os = "windows")]
+use winapi::um::sysinfoapi::{GetSystemInfo, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_INFO};
+#[cfg(target_os = "windows")]
+use winapi::um::winnt::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+
+#[derive(Default)]
+struct AppState {
+    config: Mutex<Config>,
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
-    start_threshold_mb: f32,
-    stop_threshold_mb: f32,
+    start_threshold_mb: u64,
+    stop_threshold_mb: u64,
     auto_clean_enabled: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            start_threshold_mb: 2048.0,
-            stop_threshold_mb: 1024.0,
+            start_threshold_mb: 2048,
+            stop_threshold_mb: 1024,
             auto_clean_enabled: true,
         }
     }
 }
 
-struct CacheManager {
-    config: Config,
-    last_clean_time: Arc<Mutex<Option<Instant>>>,
-    last_update_time: Instant,
-    ram_cache_mb: f32,
-    total_ram_mb: f32,
-    is_cleaning: bool,
-    status_message: String,
+#[derive(Serialize)]
+struct MemoryInfo {
+    total_mb: u64,
+    available_mb: u64,
+    used_mb: u64,
+    cache_mb: u64,
+    usage_percent: f32,
 }
 
-impl CacheManager {
-    fn new() -> Self {
-        let config = Self::load_config().unwrap_or_default();
-        let total_ram = Self::get_total_ram();
-        
-        Self {
-            config,
-            last_clean_time: Arc::new(Mutex::new(None)),
-            last_update_time: Instant::now(),
-            ram_cache_mb: 0.0,
-            total_ram_mb: total_ram,
-            is_cleaning: false,
-            status_message: String::from("Ready"),
-        }
-    }
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn get_memory_info() -> Result<MemoryInfo, String> {
+    unsafe {
+        let mut mem_status: MEMORYSTATUSEX = std::mem::zeroed();
+        mem_status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
 
-    fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
-        let config_path = Self::config_path();
-        let data = std::fs::read_to_string(config_path)?;
-        Ok(serde_json::from_str(&data)?)
-    }
-
-    fn save_config(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config_path = Self::config_path();
-        let data = serde_json::to_string_pretty(&self.config)?;
-        std::fs::write(config_path, data)?;
-        Ok(())
-    }
-
-    fn config_path() -> PathBuf {
-        let mut path = if cfg!(target_os = "windows") {
-            dirs::config_dir()
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        } else {
-            std::env::current_dir().unwrap_or_default()
-        };
-        
-        if cfg!(target_os = "windows") {
-            path.push("CacheManager");
-            std::fs::create_dir_all(&path).ok();
-        }
-        
-        path.push("cache_manager_config.json");
-        path
-    }
-
-    #[cfg(target_os = "windows")]
-    fn get_total_ram() -> f32 {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        
-        if let Ok(output) = Command::new("wmic")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(&["ComputerSystem", "get", "TotalPhysicalMemory"])
-            .output()
-        {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                for line in text.lines() {
-                    if let Ok(bytes) = line.trim().parse::<u64>() {
-                        return (bytes as f32) / (1024.0 * 1024.0);
-                    }
-                }
-            }
-        }
-        8192.0
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn get_total_ram() -> f32 {
-        8192.0
-    }
-
-    #[cfg(target_os = "windows")]
-    fn get_ram_cache_fast(&self) -> f32 {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        
-        // Only use wmic (faster than PowerShell)
-        if let Ok(output) = Command::new("wmic")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(&["OS", "get", "FreePhysicalMemory"])
-            .output()
-        {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                for line in text.lines() {
-                    if let Ok(kb) = line.trim().parse::<u64>() {
-                        let used_mb = self.total_ram_mb - (kb as f32 / 1024.0);
-                        return used_mb * 0.6; // Estimate 60% of used RAM is cache
-                    }
-                }
-            }
-        }
-        0.0
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn get_ram_cache_fast(&self) -> f32 {
-        0.0
-    }
-
-    #[cfg(target_os = "windows")]
-    fn clean_ram_cache(&mut self) {
-        self.is_cleaning = true;
-        self.status_message = String::from("Cleaning RAM cache...");
-
-        let initial_cache = self.ram_cache_mb;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-        // Only use the most effective method: Empty Working Sets
-        let _ = Command::new("powershell")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(&[
-                "-NoProfile", "-WindowStyle", "Hidden", "-Command",
-                "$ps = Get-Process | Where-Object {$_.WorkingSet64 -gt 50MB} | Sort-Object WorkingSet64 -Descending | Select-Object -First 15; foreach($p in $ps) { try { $p.MinWorkingSet = 1KB; $p.MaxWorkingSet = 1KB } catch {} }",
-            ])
-            .output();
-
-        std::thread::sleep(Duration::from_millis(300));
-
-        // Update RAM cache
-        self.ram_cache_mb = self.get_ram_cache_fast();
-        let cleaned_mb = initial_cache - self.ram_cache_mb;
-        
-        self.status_message = if cleaned_mb > 50.0 {
-            format!("✅ Cleaned {:.0} MB of RAM", cleaned_mb)
-        } else if cleaned_mb > 0.0 {
-            format!("⚠️ Cleaned {:.0} MB (run as admin for better results)", cleaned_mb)
-        } else {
-            String::from("⚠️ Unable to free RAM. Try running as Administrator")
-        };
-
-        *self.last_clean_time.lock().unwrap() = Some(Instant::now());
-        self.is_cleaning = false;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn clean_ram_cache(&mut self) {
-        self.status_message = String::from("RAM cleaning only supported on Windows");
-    }
-
-    fn should_auto_clean(&self) -> bool {
-        if !self.config.auto_clean_enabled {
-            return false;
+        if GlobalMemoryStatusEx(&mut mem_status) == 0 {
+            return Err("Failed to get memory status".to_string());
         }
 
-        if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
-            if last_time.elapsed() < Duration::from_secs(30) {
-                return false;
-            }
-        }
+        let total_mb = mem_status.ullTotalPhys / (1024 * 1024);
+        let available_mb = mem_status.ullAvailPhys / (1024 * 1024);
+        let used_mb = total_mb - available_mb;
+        
+        // Estimate cache: typically 40-60% of used memory
+        let cache_mb = (used_mb as f32 * 0.5) as u64;
+        let usage_percent = ((used_mb as f32 / total_mb as f32) * 100.0);
 
-        self.ram_cache_mb >= self.config.start_threshold_mb
+        Ok(MemoryInfo {
+            total_mb,
+            available_mb,
+            used_mb,
+            cache_mb,
+            usage_percent,
+        })
     }
 }
 
-impl eframe::App for CacheManager {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Only update RAM every 3 seconds to reduce lag
-        if self.last_update_time.elapsed() >= Duration::from_secs(3) {
-            self.ram_cache_mb = self.get_ram_cache_fast();
-            self.last_update_time = Instant::now();
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn get_memory_info() -> Result<MemoryInfo, String> {
+    Err("Only supported on Windows".to_string())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn clean_memory_cache(target_mb: u64) -> Result<u64, String> {
+    unsafe {
+        let mut cleaned_mb: u64 = 0;
+        let chunk_size = 100 * 1024 * 1024; // 100MB chunks
+        let max_iterations = (target_mb * 1024 * 1024) / chunk_size;
+
+        // Method 1: Force memory to be paged out by allocating and freeing
+        for _ in 0..max_iterations {
+            let ptr = VirtualAlloc(
+                std::ptr::null_mut(),
+                chunk_size as usize,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            );
+
+            if !ptr.is_null() {
+                // Write to memory to ensure it's committed
+                std::ptr::write_bytes(ptr as *mut u8, 0, chunk_size as usize);
+                
+                // Free immediately
+                VirtualFree(ptr, 0, MEM_RELEASE);
+                cleaned_mb += 100;
+            } else {
+                break;
+            }
+
+            // Small delay to not overwhelm system
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        // Auto clean if needed
-        if self.should_auto_clean() && !self.is_cleaning {
-            self.clean_ram_cache();
-        }
+        // Method 2: Clear working set of current process
+        use winapi::um::processthreadsapi::GetCurrentProcess;
+        use winapi::um::psapi::EmptyWorkingSet;
+        
+        let process = GetCurrentProcess();
+        EmptyWorkingSet(process);
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(egui::Color32::from_rgb(20, 20, 20)))
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(20.0);
-                    
-                    ui.heading(
-                        egui::RichText::new("🧠 RAM Cache Manager")
-                            .size(28.0)
-                            .color(egui::Color32::from_rgb(100, 200, 255))
-                    );
-                    
-                    ui.add_space(30.0);
-
-                    ui.label(
-                        egui::RichText::new(format!("💾 Total RAM: {:.0} MB", self.total_ram_mb))
-                            .size(16.0)
-                            .color(egui::Color32::from_rgb(150, 150, 150))
-                    );
-
-                    ui.add_space(10.0);
-
-                    ui.label(
-                        egui::RichText::new(format!("📊 RAM in use: {:.0} MB", self.ram_cache_mb))
-                            .size(18.0)
-                            .color(egui::Color32::WHITE)
-                    );
-
-                    let progress = (self.ram_cache_mb / self.total_ram_mb).clamp(0.0, 1.0);
-                    ui.add_space(10.0);
-                    ui.add(
-                        egui::ProgressBar::new(progress)
-                            .text(format!("{:.1}%", progress * 100.0))
-                            .fill(egui::Color32::from_rgb(100, 200, 255))
-                    );
-
-                    ui.add_space(10.0);
-
-                    ui.label(
-                        egui::RichText::new(&self.status_message)
-                            .size(14.0)
-                            .color(egui::Color32::from_rgb(150, 150, 150))
-                    );
-
-                    ui.add_space(30.0);
-
-                    ui.label(
-                        egui::RichText::new("🚀 Start cleaning threshold:")
-                            .size(16.0)
-                            .color(egui::Color32::WHITE)
-                    );
-                    ui.add_space(5.0);
-
-                    let mut start_threshold = self.config.start_threshold_mb;
-                    ui.add(
-                        egui::Slider::new(&mut start_threshold, 512.0..=self.total_ram_mb)
-                            .text("MB")
-                            .step_by(128.0)
-                    );
-                    
-                    if start_threshold <= self.config.stop_threshold_mb {
-                        start_threshold = self.config.stop_threshold_mb + 128.0;
-                    }
-                    self.config.start_threshold_mb = start_threshold;
-
-                    ui.add_space(15.0);
-
-                    ui.label(
-                        egui::RichText::new("🛑 Stop cleaning threshold:")
-                            .size(16.0)
-                            .color(egui::Color32::WHITE)
-                    );
-                    ui.add_space(5.0);
-
-                    let mut stop_threshold = self.config.stop_threshold_mb;
-                    ui.add(
-                        egui::Slider::new(&mut stop_threshold, 256.0..=(self.total_ram_mb - 256.0))
-                            .text("MB")
-                            .step_by(128.0)
-                    );
-                    
-                    if stop_threshold >= self.config.start_threshold_mb {
-                        stop_threshold = self.config.start_threshold_mb - 128.0;
-                    }
-                    self.config.stop_threshold_mb = stop_threshold;
-
-                    ui.add_space(10.0);
-                    
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Clean when RAM ≥ {:.0} MB, stop when ≤ {:.0} MB",
-                            start_threshold, stop_threshold
-                        ))
-                            .size(13.0)
-                            .color(egui::Color32::from_rgb(180, 180, 180))
-                    );
-
-                    ui.add_space(20.0);
-
-                    ui.checkbox(
-                        &mut self.config.auto_clean_enabled,
-                        egui::RichText::new("🔄 Enable auto-clean (30s interval)")
-                            .size(15.0)
-                            .color(egui::Color32::WHITE)
-                    );
-
-                    ui.add_space(25.0);
-
-                    if ui.add_sized([200.0, 40.0], egui::Button::new(
-                        egui::RichText::new("💾 Save Configuration").size(16.0)
-                    )).clicked() {
-                        self.status_message = match self.save_config() {
-                            Ok(_) => String::from("✅ Configuration saved"),
-                            Err(e) => format!("❌ Error: {}", e),
-                        };
-                    }
-
-                    ui.add_space(10.0);
-
-                    if ui.add_sized([200.0, 40.0], egui::Button::new(
-                        egui::RichText::new("🧹 Clean RAM Now").size(16.0)
-                    )).clicked() {
-                        self.clean_ram_cache();
-                    }
-
-                    ui.add_space(15.0);
-
-                    if self.is_cleaning {
-                        ui.spinner();
-                        ui.add_space(10.0);
-                    }
-
-                    if let Some(last_time) = *self.last_clean_time.lock().unwrap() {
-                        ui.label(
-                            egui::RichText::new(format!("⏱️ Last cleaned: {}s ago", last_time.elapsed().as_secs()))
-                                .size(13.0)
-                                .color(egui::Color32::from_rgb(150, 150, 150))
-                        );
-                        ui.add_space(5.0);
-                    }
-
-                    ui.label(
-                        egui::RichText::new("⚠️ Run as Administrator for best results")
-                            .size(12.0)
-                            .color(egui::Color32::from_rgb(255, 200, 100))
-                    );
-                });
-            });
-
-        // Only repaint every 3 seconds instead of 1 second
-        ctx.request_repaint_after(Duration::from_secs(3));
+        Ok(cleaned_mb)
     }
 }
 
-fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 620.0])
-            .with_min_inner_size([450.0, 550.0])
-            .with_resizable(true)
-            .with_title("RAM Cache Manager"),
-        ..Default::default()
-    };
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn clean_memory_cache(_target_mb: u64) -> Result<u64, String> {
+    Err("Only supported on Windows".to_string())
+}
 
-    eframe::run_native(
-        "RAM Cache Manager",
-        options,
-        Box::new(|_cc| Ok(Box::new(CacheManager::new()))),
-    )
+#[tauri::command]
+fn save_config(state: State<AppState>, config: Config) -> Result<(), String> {
+    let mut app_config = state.config.lock().unwrap();
+    *app_config = config;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_config(state: State<AppState>) -> Result<Config, String> {
+    let config = state.config.lock().unwrap();
+    Ok(config.clone())
+}
+
+fn main() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            get_memory_info,
+            clean_memory_cache,
+            save_config,
+            load_config
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
