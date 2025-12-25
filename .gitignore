@@ -3,14 +3,11 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo lock file (optional - uncomment if you want to ignore it)
+# Cargo lock file (optional)
 # Cargo.lock
 
 # Debug builds
 debug/
-
-# Release builds (uncomment if you don't want to commit binaries)
-# release/
 
 # IDE và Editor files
 .vscode/
@@ -28,7 +25,10 @@ Desktop.ini
 *.so
 *.dylib
 
-# Config files (optional - nếu không muốn commit config cá nhân)
+# Tauri specific
+/src-tauri/target/
+
+# Config files (optional)
 # cache_manager_config.json
 
 # Backup files
@@ -56,3 +56,7 @@ rls/
 .Spotlight-V100
 .Trashes
 ehthumbs.db
+
+# Node modules (nếu có)
+node_modules/
+dist/

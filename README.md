@@ -15,19 +15,26 @@ Advanced Memory Cache Cleaner for Windows with Tauri UI
 
 ### Prerequisites
 - Rust 1.70+
-- Node.js (not required, UI is pure HTML/JS)
-- Windows OS
+- Windows OS (for building on Linux/Codespaces, use cross-compilation)
 
-### Build from source
+### Build from source (trên Codespaces/Linux)
 
 ```bash
-# Install Tauri CLI
-cargo install tauri-cli
+# Đã có config trong .cargo/config.toml
+# Build release cho Windows
+cargo build --release
 
+# File .exe sẽ ở:
+# target/x86_64-pc-windows-gnu/release/memory-cache-manager.exe
+```
+
+### Build trên Windows
+
+```bash
 # Build release
-cargo tauri build
+cargo build --release
 
-# The .exe will be in:
+# File .exe tại:
 # target/release/memory-cache-manager.exe
 ```
 
@@ -35,14 +42,37 @@ cargo tauri build
 
 ```
 memory-cache-manager/
-├── Cargo.toml          # Rust dependencies
-├── build.rs            # Tauri build script
-├── tauri.conf.json     # Tauri configuration
+├── .cargo/
+│   └── config.toml      # Cross-compile config
+├── Cargo.toml           # Rust dependencies
+├── build.rs             # Tauri build script
+├── tauri.conf.json      # Tauri configuration
 ├── src/
-│   ├── main.rs         # Rust backend (Windows API)
-│   └── lib.rs          # Library entry
+│   ├── main.rs          # Rust backend (Windows API)
+│   └── lib.rs           # Library entry
 └── ui/
-    └── index.html      # Frontend UI
+    └── index.html       # Frontend UI
+```
+
+## 🔧 Setup ngay
+
+### Bước 1: Tạo cấu trúc thư mục
+```bash
+mkdir -p src ui .cargo
+```
+
+### Bước 2: Copy các file
+- `Cargo.toml` (từ artifact 1)
+- `build.rs` (từ artifact 4)
+- `tauri.conf.json` (từ artifact mới vừa update)
+- `.cargo/config.toml` (từ document 2)
+- `src/main.rs` (từ artifact 2)
+- `src/lib.rs` (từ artifact 3)
+- `ui/index.html` (từ artifact 6)
+
+### Bước 3: Build
+```bash
+cargo build --release
 ```
 
 ## 🎯 How It Works
@@ -88,23 +118,36 @@ memory-cache-manager/
 ## 🛠️ Development
 
 ```bash
-# Run in dev mode
-cargo tauri dev
+# Run in dev mode (trên Windows)
+cargo run --release
 
 # Build release
-cargo tauri build
+cargo build --release
 
 # Clean build artifacts
 cargo clean
 ```
 
+## 🐛 Troubleshooting
+
+### Lỗi `tauri.conf.json`
+- Đảm bảo file có đúng format (đã update trong artifact)
+- File phải có `identifier` trong `bundle`
+
+### Build failed
+```bash
+# Xóa cache và build lại
+cargo clean
+cargo build --release
+```
+
+### Cross-compile issues
+- Đảm bảo đã cài `mingw-w64`
+- File `.cargo/config.toml` phải có trong project root
+
 ## 📝 License
 
 MIT License - Feel free to use and modify
-
-## 🤝 Contributing
-
-Contributions welcome! Please feel free to submit a Pull Request.
 
 ---
 

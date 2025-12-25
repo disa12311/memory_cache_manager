@@ -1,9 +1,10 @@
 {
+  "$schema": "https://schema.tauri.app/config/1",
   "build": {
-    "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "distDir": "../ui",
     "devPath": "../ui",
-    "distDir": "../ui"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
   },
   "package": {
     "productName": "Memory Cache Manager",
@@ -11,37 +12,56 @@
   },
   "tauri": {
     "allowlist": {
-      "all": false,
-      "shell": {
-        "all": false,
-        "open": true
-      }
+      "all": false
     },
     "bundle": {
       "active": true,
-      "targets": "all",
-      "identifier": "com.memorycache.manager",
+      "category": "Utility",
+      "copyright": "",
+      "deb": {
+        "depends": []
+      },
+      "externalBin": [],
       "icon": [
         "icons/32x32.png",
         "icons/128x128.png",
+        "icons/128x128@2x.png",
         "icons/icon.icns",
         "icons/icon.ico"
-      ]
+      ],
+      "identifier": "com.memorycache.manager",
+      "longDescription": "",
+      "macOS": {
+        "entitlements": null,
+        "exceptionDomain": "",
+        "frameworks": [],
+        "providerShortName": null,
+        "signingIdentity": null
+      },
+      "resources": [],
+      "shortDescription": "",
+      "targets": "all",
+      "windows": {
+        "certificateThumbprint": null,
+        "digestAlgorithm": "sha256",
+        "timestampUrl": ""
+      }
     },
     "security": {
       "csp": null
     },
+    "updater": {
+      "active": false
+    },
     "windows": [
       {
         "fullscreen": false,
+        "height": 700,
         "resizable": true,
         "title": "Memory Cache Manager v1.0",
         "width": 600,
-        "height": 700,
-        "minWidth": 500,
         "minHeight": 600,
-        "decorations": true,
-        "transparent": false
+        "minWidth": 500
       }
     ]
   }
