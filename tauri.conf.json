@@ -4,9 +4,9 @@
   "identifier": "com.memorycache.manager",
   "build": {
     "beforeDevCommand": "",
-    "devUrl": "ui/index.html",
+    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "",
-    "frontendDist": "ui"
+    "frontendDist": "../ui"
   },
   "bundle": {
     "active": true,
